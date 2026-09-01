@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Estimator & Construction Forum/Review Scanner
-Scans estimation-relevant forums (RSS), review sites, and industry news
-for content ideas and pain points. No API keys needed.
+Estimator & Construction Forum/Review Scanner v2
+Scans estimation-relevant RSS feeds and industry blogs.
+No API keys needed.
 
-Schedule via GitHub Actions cron (see .github/workflows/scan.yml).
+Schedule via GitHub Actions cron.
 """
 
 import json
@@ -21,32 +21,34 @@ from html import unescape
 
 # --- Configuration ---
 
-# RSS Feeds (forums, news, industry)
 RSS_FEEDS = {
+    # Industry news (verified working)
+    "Construction Dive": "https://www.constructiondive.com/feeds/news/",
+    "For Construction Pros": "https://www.forconstructionpros.com/rss",
+    "ConstructConnect Blog": "https://www.constructconnect.com/blog/rss.xml",
+    "Autodesk Construction Blog": "https://www.autodesk.com/blogs/construction/feed/",
+    "Construction Executive": "https://www.constructionexec.com/rss",
+    "Construction Business Owner": "https://www.constructionbusinessowner.com/rss.xml",
+
+    # Eng-Tips forums (piping, mechanical, structural)
     "Eng-Tips: Piping": "https://www.eng-tips.com/rss/forum.cfm?fid=50",
     "Eng-Tips: Mechanical": "https://www.eng-tips.com/rss/forum.cfm?fid=52",
     "Eng-Tips: Structural": "https://www.eng-tips.com/rss/forum.cfm?fid=151",
-    "Construction Dive": "https://www.constructiondive.com/feeds/news/",
-    "Construction Dive: Technology": "https://www.constructiondive.com/feeds/topic/construction-technology/",
-    "ENR: Construction": "https://www.enr.com/feeds/topics/7-construction",
-    "ENR: Technology": "https://www.enr.com/feeds/topics/93-technology",
-    "For Construction Pros": "https://www.forconstructionpros.com/rss",
-    "JLC Online": "https://www.jlconline.com/rss",
-}
+    "Eng-Tips: Estimating": "https://www.eng-tips.com/rss/forum.cfm?fid=290",
 
-# Google search queries for review sites and forums without RSS
-GOOGLE_QUERIES = [
-    'site:g2.com "Bluebeam" estimating review 2025 OR 2026',
-    'site:g2.com "PlanSwift" OR "HCSS" estimating review 2025 OR 2026',
-    'site:capterra.com "piping estimating" OR "construction estimating" review 2025 OR 2026',
-    'site:capterra.com "Bluebeam" OR "FastPIPE" review 2025 OR 2026',
-    'site:contractortalk.com estimating OR takeoff OR bidding',
-    'site:eng-tips.com "piping estimating" OR "material takeoff" OR "P&ID"',
-    '"construction estimator" burnout OR shortage OR hiring OR retirement 2025 OR 2026',
-    '"estimating software" frustration OR complaint OR switching OR replacement',
-    '"AI takeoff" OR "AI estimating" construction piping mechanical',
-    '"data center" piping contractor estimating backlog',
-]
+    # Technology and software
+    "Constructech": "https://constructech.com/feed/",
+    "Trimble Viewpoint Blog": "https://www.viewpoint.com/blog/rss.xml",
+    "Procore Blog": "https://www.procore.com/jobsite/feed/",
+
+    # Workforce and labor
+    "ABC Newsline": "https://www.abc.org/News-Media/Newsline/rss",
+    "AGC News": "https://www.agc.org/rss.xml",
+
+    # Estimating specific
+    "RSMeans Blog": "https://www.rsmeans.com/resources/rss",
+    "Bluebeam Blog": "https://www.bluebeam.com/blog/feed/",
+}
 
 KEYWORDS = [
     "estimat", "takeoff", "take-off", "MTO", "material takeoff",
@@ -60,10 +62,11 @@ KEYWORDS = [
     "cost overrun", "change order", "scope creep",
     "turnaround", "refinery", "petrochemical", "gulf coast",
     "mechanical contractor", "industrial contractor",
-    "data center", "backlog",
+    "data center", "backlog", "workforce",
+    "software", "digital", "construction technology",
 ]
 
-USER_AGENT = "Mozilla/5.0 (compatible; EstimatorScanner/2.0)"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 OUTPUT_DIR = Path("output")
 
 
@@ -76,6 +79,15 @@ def fetch_url(url: str, timeout: int = 15) -> str | None:
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
         print(f"  [WARN] Failed to fetch {url}: {e}", file=sys.stderr)
         return None
+
+
+def clean_xml(text: str) -> str:
+    """Pre-process XML to handle common malformed RSS issues."""
+    # Replace unescaped ampersands (common in Eng-Tips and other forums)
+    text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)', '&amp;', text)
+    # Remove control characters except tab, newline, carriage return
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+    return text
 
 
 def strip_html(text: str) -> str:
@@ -95,6 +107,8 @@ def matches_keywords(text: str) -> list:
 def parse_rss(xml_text: str, source_name: str) -> list:
     """Parse RSS/Atom XML and return matching items."""
     results = []
+    xml_text = clean_xml(xml_text)
+
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError as e:
@@ -116,6 +130,9 @@ def parse_rss(xml_text: str, source_name: str) -> list:
         link_el = item.find("link")
         desc_el = item.find("description")
         pubdate_el = item.find("pubDate")
+        author_el = item.find("author")
+        creator_el = item.find("{http://purl.org/dc/elements/1.1/}creator")
+        category_el = item.find("category")
 
         # Atom fallback
         if title_el is None:
@@ -136,6 +153,14 @@ def parse_rss(xml_text: str, source_name: str) -> list:
             link = ""
         description = strip_html(desc_el.text if desc_el is not None and desc_el.text else "")
         pubdate = pubdate_el.text if pubdate_el is not None and pubdate_el.text else ""
+        author = ""
+        if author_el is not None and author_el.text:
+            author = author_el.text
+        elif creator_el is not None and creator_el.text:
+            author = creator_el.text
+        else:
+            author = source_name
+        category = category_el.text if category_el is not None and category_el.text else ""
 
         combined = f"{title} {description}"
         matched = matches_keywords(combined)
@@ -145,54 +170,11 @@ def parse_rss(xml_text: str, source_name: str) -> list:
                 "source": source_name,
                 "title": title.strip(),
                 "url": link.strip(),
-                "score": 0,
-                "num_comments": 0,
-                "created_utc": pubdate.strip(),
-                "author": source_name,
-                "selftext_preview": description[:300],
+                "date": pubdate.strip(),
+                "author": author.strip(),
+                "preview": description[:400],
                 "matched_keywords": ", ".join(sorted(set(matched))),
-                "flair": "RSS",
-            })
-
-    return results
-
-
-def google_search_scrape(query: str) -> list:
-    """Search Google and extract result URLs and titles from the HTML.
-    This is best-effort and may fail if Google blocks the request."""
-    encoded = urllib.request.quote(query)
-    url = f"https://www.google.com/search?q={encoded}&num=10"
-    html = fetch_url(url)
-    if not html:
-        return []
-
-    results = []
-    # Extract search result links - pattern for Google's result HTML
-    # This is fragile and may break, but works as a fallback
-    link_pattern = re.compile(r'<a[^>]+href="/url\?q=(https?://[^&"]+)', re.IGNORECASE)
-    title_pattern = re.compile(r'<h3[^>]*>(.*?)</h3>', re.IGNORECASE | re.DOTALL)
-
-    links = link_pattern.findall(html)
-    titles = [strip_html(t) for t in title_pattern.findall(html)]
-
-    for i, link in enumerate(links[:10]):
-        link = urllib.request.unquote(link)
-        title = titles[i] if i < len(titles) else ""
-        combined = f"{title} {link}"
-        matched = matches_keywords(combined)
-
-        if matched:
-            results.append({
-                "source": "Google Search",
-                "title": title,
-                "url": link,
-                "score": 0,
-                "num_comments": 0,
-                "created_utc": datetime.now(timezone.utc).isoformat(),
-                "author": "Google Search",
-                "selftext_preview": f"Query: {query}",
-                "matched_keywords": ", ".join(sorted(set(matched))),
-                "flair": "Search",
+                "category": category,
             })
 
     return results
@@ -205,9 +187,11 @@ def run_scan():
     outfile = OUTPUT_DIR / f"estimator_scan_{timestamp}.csv"
 
     all_results = []
+    working_sources = 0
+    failed_sources = 0
 
-    # Phase 1: RSS Feeds
-    print("=== Phase 1: RSS Feeds ===\n")
+    print(f"=== Estimator Forum Scan ({timestamp}) ===\n")
+
     for name, feed_url in RSS_FEEDS.items():
         print(f"Scanning {name}...")
         xml_text = fetch_url(feed_url)
@@ -215,30 +199,24 @@ def run_scan():
             items = parse_rss(xml_text, name)
             all_results.extend(items)
             print(f"  Found {len(items)} matching items")
+            working_sources += 1
+        else:
+            failed_sources += 1
         time.sleep(1)
-
-    # Phase 2: Google searches for review sites and forums
-    print("\n=== Phase 2: Review Sites & Forum Search ===\n")
-    for query in GOOGLE_QUERIES:
-        print(f"Searching: {query[:60]}...")
-        items = google_search_scrape(query)
-        all_results.extend(items)
-        print(f"  Found {len(items)} results")
-        time.sleep(3)  # be polite to Google
 
     # Deduplicate by URL
     seen_urls = set()
     deduped = []
     for r in all_results:
-        if r["url"] not in seen_urls:
+        if r["url"] and r["url"] not in seen_urls:
             seen_urls.add(r["url"])
             deduped.append(r)
     all_results = deduped
 
     # Write CSV
     fieldnames = [
-        "source", "title", "url", "score", "num_comments",
-        "created_utc", "author", "selftext_preview", "matched_keywords", "flair"
+        "source", "title", "url", "date", "author",
+        "preview", "matched_keywords", "category"
     ]
     with open(outfile, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -248,8 +226,10 @@ def run_scan():
 
     print(f"\nWrote {len(all_results)} items to {outfile}")
 
-    # Summary stats
-    print(f"\n--- Scan Summary ({timestamp}) ---")
+    # Summary
+    print(f"\n--- Scan Summary ---")
+    print(f"Sources working: {working_sources}/{len(RSS_FEEDS)}")
+    print(f"Sources failed: {failed_sources}/{len(RSS_FEEDS)}")
     print(f"Total matching items: {len(all_results)}")
     if all_results:
         by_source = {}
