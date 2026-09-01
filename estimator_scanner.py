@@ -1,52 +1,29 @@
 #!/usr/bin/env python3
 """
-Estimator & Construction Forum/Review Scanner v4
-Only confirmed-working RSS sources. Crash-proof fetch.
-No API keys needed.
+Estimator & Construction Forum/Review Scanner v5
+Fixed XML element truthiness bug. Crash-proof. No API keys.
 """
 
-import json
 import csv
+import re
 import sys
 import time
-import re
 import xml.etree.ElementTree as ET
 import urllib.request
-import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from html import unescape
 
-# --- ONLY CONFIRMED WORKING SOURCES ---
 RSS_FEEDS = {
-    # Industry news
     "Construction Dive": "https://www.constructiondive.com/feeds/news/",
     "For Construction Pros": "https://www.forconstructionpros.com/rss",
     "Construction Business Owner": "https://www.constructionbusinessowner.com/rss.xml",
     "AGC News": "https://www.agc.org/rss.xml",
-
-    # Preconstruction and estimating
     "ConstructConnect Blog": "https://www.constructconnect.com/blog/rss.xml",
     "Procore Jobsite Blog": "https://www.procore.com/jobsite/feed/",
-
-    # Mechanical, piping, MEP trade associations
     "MCAA News": "https://www.mcaa.org/feed/",
     "PHCC Connect": "https://www.phccweb.org/feed/",
-
-    # Industrial and Gulf Coast
-    "Plant Services": "https://www.plantservices.com/rss/",
     "Chemical Engineering": "https://www.chemengonline.com/feed/",
-
-    # Workforce and safety
-    "NCCER Blog": "https://www.nccer.org/news/feed/",
-    "OSHA QuickTakes": "https://www.osha.gov/quicktakes/feed",
-
-    # Project management and bidding
-    "Dodge Data Blog": "https://www.construction.com/blog/feed/",
-    "ENR Articles": "https://www.enr.com/articles/feed",
-
-    # Estimating software vendors (their blogs catch industry trends)
-    "SmartBid Blog": "https://www.smartbidnet.com/blog/rss.xml",
 }
 
 KEYWORDS = [
@@ -79,8 +56,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 OUTPUT_DIR = Path("output")
 
 
-def fetch_url(url: str, timeout: int = 15) -> str | None:
-    """Fetch a URL. Catches ALL exceptions so one bad source never kills the scan."""
+def fetch_url(url, timeout=15):
     req = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT,
         "Accept": "application/rss+xml, application/xml, text/xml, */*",
@@ -93,15 +69,12 @@ def fetch_url(url: str, timeout: int = 15) -> str | None:
         return None
 
 
-def clean_xml(text: str) -> str:
-    """Pre-process XML to handle common RSS issues."""
-    xml_start = text.find("<?xml")
-    if xml_start == -1:
-        xml_start = text.find("<rss")
-    if xml_start == -1:
-        xml_start = text.find("<feed")
-    if xml_start > 0:
-        text = text[xml_start:]
+def clean_xml(text):
+    for start_tag in ["<?xml", "<rss", "<feed"]:
+        idx = text.find(start_tag)
+        if idx > 0:
+            text = text[idx:]
+            break
     text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)', '&amp;', text)
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
     for old, new in [('&nbsp;',' '),('&mdash;','-'),('&ndash;','-'),
@@ -111,20 +84,48 @@ def clean_xml(text: str) -> str:
     return text
 
 
-def strip_html(text: str) -> str:
+def strip_html(text):
     text = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', text, flags=re.DOTALL)
-    clean = re.sub(r"<[^>]+>", " ", text)
-    clean = unescape(clean)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    return clean
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-def matches_keywords(text: str) -> list:
+def find_el(item, *paths, ns=None):
+    """Find first matching element. Replaces broken 'or' pattern."""
+    if ns is None:
+        ns = {}
+    for path in paths:
+        el = item.find(path, ns)
+        if el is not None:
+            return el
+    return None
+
+
+def get_text(el):
+    """Safely get text from an element."""
+    if el is None:
+        return ""
+    return (el.text or "").strip()
+
+
+def get_link(el):
+    """Get URL from a link element (handles both RSS and Atom)."""
+    if el is None:
+        return ""
+    href = el.get("href", "")
+    if href:
+        return href.strip()
+    return (el.text or "").strip()
+
+
+def matches_keywords(text):
     text_lower = text.lower()
     return [kw for kw in KEYWORDS if kw.lower() in text_lower]
 
 
-def parse_rss(xml_text: str, source_name: str) -> list:
+def parse_rss(xml_text, source_name):
     results = []
     xml_text = clean_xml(xml_text)
     try:
@@ -144,44 +145,36 @@ def parse_rss(xml_text: str, source_name: str) -> list:
         items = root.findall(".//atom:entry", ns)
 
     for item in items:
-        title_el = item.find("title") or item.find("atom:title", ns)
-        link_el = item.find("link") or item.find("atom:link", ns)
-        content_el = item.find("content:encoded", ns)
-        desc_el = item.find("description") or item.find("atom:summary", ns)
-        pubdate_el = item.find("pubDate") or item.find("atom:updated", ns) or item.find("atom:published", ns)
-        creator_el = item.find("dc:creator", ns)
-        author_el = item.find("author")
-        category_el = item.find("category")
+        title_el = find_el(item, "title", "atom:title", ns=ns)
+        link_el = find_el(item, "link", "atom:link", ns=ns)
+        content_el = find_el(item, "content:encoded", ns=ns)
+        desc_el = find_el(item, "description", "atom:summary", "atom:content", ns=ns)
+        pubdate_el = find_el(item, "pubDate", "atom:updated", "atom:published", ns=ns)
+        creator_el = find_el(item, "dc:creator", ns=ns)
+        author_el = find_el(item, "author", ns=ns)
+        category_el = find_el(item, "category", ns=ns)
 
-        title = strip_html(title_el.text) if title_el is not None and title_el.text else ""
-        link = ""
-        if link_el is not None:
-            link = link_el.get("href", "") or (link_el.text or "")
+        title = strip_html(get_text(title_el))
+        link = get_link(link_el)
+
         if content_el is not None and content_el.text:
             description = strip_html(content_el.text)
-        elif desc_el is not None and desc_el.text:
-            description = strip_html(desc_el.text)
         else:
-            description = ""
-        pubdate = pubdate_el.text.strip() if pubdate_el is not None and pubdate_el.text else ""
-        author = ""
-        if creator_el is not None and creator_el.text:
-            author = creator_el.text
-        elif author_el is not None and author_el.text:
-            author = author_el.text
-        else:
-            author = source_name
-        category = strip_html(category_el.text) if category_el is not None and category_el.text else ""
+            description = strip_html(get_text(desc_el))
+
+        pubdate = get_text(pubdate_el)
+        author = get_text(creator_el) or get_text(author_el) or source_name
+        category = strip_html(get_text(category_el))
 
         combined = f"{title} {description}"
         matched = matches_keywords(combined)
         if matched:
             results.append({
                 "source": source_name,
-                "title": title.strip(),
-                "url": link.strip(),
+                "title": title,
+                "url": link,
                 "date": pubdate,
-                "author": author.strip(),
+                "author": author,
                 "preview": description[:400],
                 "matched_keywords": ", ".join(sorted(set(matched))),
                 "category": category,
@@ -200,7 +193,7 @@ def run_scan():
     failed = 0
     failed_names = []
 
-    print(f"=== Estimator Scan v4 ({timestamp}) ===\n")
+    print(f"=== Estimator Scan v5 ({timestamp}) ===\n")
 
     for name, feed_url in RSS_FEEDS.items():
         print(f"Scanning {name}...")
@@ -208,23 +201,25 @@ def run_scan():
         if xml_text:
             items = parse_rss(xml_text, name)
             all_results.extend(items)
-            print(f"  OK: {len(items)} matching items")
+            print(f"  OK: {len(items)} matching / URLs present: {sum(1 for i in items if i['url'])}")
             working += 1
         else:
             failed += 1
             failed_names.append(name)
         time.sleep(1)
 
-    # Deduplicate
+    # Deduplicate by URL, but keep items with empty URLs too
     seen = set()
     deduped = []
     for r in all_results:
-        if r["url"] and r["url"] not in seen:
-            seen.add(r["url"])
+        url = r["url"]
+        if not url:
+            deduped.append(r)
+        elif url not in seen:
+            seen.add(url)
             deduped.append(r)
     all_results = deduped
 
-    # Write CSV
     fields = ["source","title","url","date","author","preview","matched_keywords","category"]
     with open(outfile, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -237,7 +232,7 @@ def run_scan():
     print(f"Working: {working}/{len(RSS_FEEDS)}")
     print(f"Failed: {failed}/{len(RSS_FEEDS)}")
     if failed_names:
-        print(f"Failed sources: {', '.join(failed_names)}")
+        print(f"Failed: {', '.join(failed_names)}")
     print(f"Total items: {len(all_results)}")
     if all_results:
         by_source = {}
